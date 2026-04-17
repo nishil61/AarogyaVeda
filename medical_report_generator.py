@@ -57,6 +57,11 @@ def _get_config_value(key: str, default=None):
 
 HF_TOKEN = _get_config_value("HF_TOKEN") or _get_config_value("HUGGINGFACE_API_KEY")
 TEXT_MODEL_ID = _get_config_value("HF_TEXT_MODEL_ID", "meta-llama/Llama-3.3-70B-Instruct")
+OPENROUTER_API_KEY = _get_config_value("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = _get_config_value("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_MODEL_ID = _get_config_value("OPENROUTER_MODEL_ID", "meta-llama/llama-3.3-70b-instruct:free")
+OPENROUTER_HTTP_REFERER = _get_config_value("OPENROUTER_HTTP_REFERER", "")
+OPENROUTER_X_TITLE = _get_config_value("OPENROUTER_X_TITLE", "AarogyaVeda")
 IMAGE_CAPTION_MODEL_ID = _get_config_value("HF_IMAGE_CAPTION_MODEL_ID", "Salesforce/blip-image-captioning-base")
 IMAGE_CLASSIFICATION_MODEL_ID = _get_config_value("HF_IMAGE_CLASSIFICATION_MODEL_ID", "google/vit-base-patch16-224")
 SIGN_CANDIDATES = ["AarogyaVeda Sign.png"]
@@ -376,6 +381,60 @@ def get_inference_client(model_id: str | None = None) -> InferenceClient:
     if not token:
         raise RuntimeError("Set HF_TOKEN in .env or run hf auth login first.")
     return InferenceClient(model=model_id or TEXT_MODEL_ID, token=token)
+
+
+@lru_cache(maxsize=1)
+def _get_openrouter_client():
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY is not configured.")
+    try:
+        from openai import OpenAI
+    except Exception as exc:
+        raise RuntimeError("openai package is required for OpenRouter fallback.") from exc
+
+    return OpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url=(OPENROUTER_BASE_URL or "https://openrouter.ai/api/v1").rstrip("/"),
+    )
+
+
+def _chat_completion_with_fallback(
+    primary_client: InferenceClient,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+) -> tuple[Any, str]:
+    try:
+        response = primary_client.chat_completion(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return response, TEXT_MODEL_ID
+    except Exception as hf_exc:
+        if not OPENROUTER_API_KEY:
+            raise hf_exc
+
+        openrouter_client = _get_openrouter_client()
+        extra_headers: dict[str, str] = {}
+        if OPENROUTER_HTTP_REFERER:
+            extra_headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER
+        if OPENROUTER_X_TITLE:
+            extra_headers["X-Title"] = OPENROUTER_X_TITLE
+
+        try:
+            response = openrouter_client.chat.completions.create(
+                model=OPENROUTER_MODEL_ID,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                extra_headers=extra_headers or None,
+            )
+            return response, f"openrouter:{OPENROUTER_MODEL_ID}"
+        except Exception as openrouter_exc:
+            raise RuntimeError(
+                f"HF generation failed: {hf_exc}. OpenRouter fallback failed: {openrouter_exc}"
+            ) from openrouter_exc
 
 
 def _extract_message_text(response: Any) -> str:
@@ -724,7 +783,8 @@ def generate_medical_report_content(
                     f"{gradcam_note}"
                     "If any image-derived text appears non-medical or irrelevant, ignore it and focus strictly on chest radiographic disease features."
                 )
-                report_response = client.chat_completion(
+                report_response, provider_model_used = _chat_completion_with_fallback(
+                    primary_client=client,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": image_assisted_prompt},
@@ -732,8 +792,10 @@ def generate_medical_report_content(
                     max_tokens=6000,
                     temperature=temperature,
                 )
+                model_used = provider_model_used
             else:
-                report_response = client.chat_completion(
+                report_response, provider_model_used = _chat_completion_with_fallback(
+                    primary_client=client,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": combined_prompt},
@@ -741,6 +803,7 @@ def generate_medical_report_content(
                     max_tokens=6000,
                     temperature=temperature,
                 )
+                model_used = provider_model_used
             full_report = _extract_message_text(report_response)
 
             findings = _extract_section(full_report, "FINDINGS", ["IMPRESSION", "PRECAUTIONS"])
@@ -762,7 +825,8 @@ def generate_medical_report_content(
                     f"IMAGE CONTEXT:\n{context_text}\n\n"
                     "Return only requested sections with their headers."
                 )
-                refill_response = client.chat_completion(
+                refill_response, provider_model_used = _chat_completion_with_fallback(
+                    primary_client=client,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": refill_prompt},
@@ -770,6 +834,7 @@ def generate_medical_report_content(
                     max_tokens=3500,
                     temperature=min(1.2, temperature + 0.1),
                 )
+                model_used = provider_model_used
                 refill_text = (
                     refill_response.choices[0].message.content.strip()
                     if hasattr(refill_response, "choices") and refill_response.choices
