@@ -68,14 +68,14 @@ OPENROUTER_MODEL_IDS = [
     for model_id in str(
         _get_config_value(
             "OPENROUTER_MODEL_IDS",
-            "meta-llama/llama-3.3-70b-instruct:free,meta-llama/llama-3.1-70b-instruct:free,meta-llama/llama-3.1-8b-instruct:free",
+            "meta-llama/llama-3.3-70b-instruct:free,meta-llama/llama-3.1-70b-instruct:free,meta-llama/llama-3.1-8b-instruct:free,mistralai/mistral-7b-instruct:free,google/gemma-2-9b-it:free",
         )
     ).split(",")
     if model_id.strip()
 ]
 OPENROUTER_HTTP_REFERER = _get_config_value("OPENROUTER_HTTP_REFERER", "")
 OPENROUTER_X_TITLE = _get_config_value("OPENROUTER_X_TITLE", "AarogyaVeda")
-OPENROUTER_MAX_TOKENS = int(str(_get_config_value("OPENROUTER_MAX_TOKENS", "1800") or "1800").strip())
+OPENROUTER_MAX_TOKENS = int(str(_get_config_value("OPENROUTER_MAX_TOKENS", "1200") or "1200").strip())
 IMAGE_CAPTION_MODEL_ID = _get_config_value("HF_IMAGE_CAPTION_MODEL_ID", "Salesforce/blip-image-captioning-base")
 IMAGE_CLASSIFICATION_MODEL_ID = _get_config_value("HF_IMAGE_CLASSIFICATION_MODEL_ID", "google/vit-base-patch16-224")
 SIGN_CANDIDATES = ["AarogyaVeda Sign.png"]
