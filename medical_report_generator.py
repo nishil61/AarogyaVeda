@@ -57,6 +57,8 @@ def _get_config_value(key: str, default=None):
 
 HF_TOKEN = _get_config_value("HF_TOKEN") or _get_config_value("HUGGINGFACE_API_KEY")
 TEXT_MODEL_ID = _get_config_value("HF_TEXT_MODEL_ID", "meta-llama/Llama-3.3-70B-Instruct")
+LOCAL_REPORT_MODEL_ID = _get_config_value("LOCAL_REPORT_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")
+LOCAL_REPORT_MAX_NEW_TOKENS = int(str(_get_config_value("LOCAL_REPORT_MAX_NEW_TOKENS", "900") or "900").strip())
 OPENROUTER_API_KEY = (
     _get_config_value("OPENROUTER_API_KEY", "")
     or _get_config_value("OPEN_ROUTER_API_KEY", "")
@@ -413,12 +415,54 @@ def _get_openrouter_client():
     )
 
 
+@lru_cache(maxsize=1)
+def _get_local_report_pipeline():
+    try:
+        from transformers import pipeline
+    except Exception as exc:
+        raise RuntimeError("transformers is required for local Hugging Face fallback.") from exc
+
+    try:
+        return pipeline(
+            "text-generation",
+            model=LOCAL_REPORT_MODEL_ID,
+            tokenizer=LOCAL_REPORT_MODEL_ID,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Local Hugging Face model '{LOCAL_REPORT_MODEL_ID}' could not be loaded.") from exc
+
+
+def _generate_local_report_text(messages: list[dict[str, str]], max_new_tokens: int, temperature: float) -> str:
+    generator = _get_local_report_pipeline()
+    tokenizer = getattr(generator, "tokenizer", None)
+
+    prompt = "\n\n".join(
+        f"{message.get('role', 'user').upper()}: {message.get('content', '')}"
+        for message in messages
+    )
+    if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
+        try:
+            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        except Exception:
+            pass
+
+    result = generator(
+        prompt,
+        max_new_tokens=max_new_tokens,
+        do_sample=True,
+        temperature=temperature,
+        return_full_text=False,
+    )
+    return _extract_message_text(result)
+
+
 def _chat_completion_with_fallback(
     primary_client: InferenceClient,
     messages: list[dict[str, str]],
     max_tokens: int,
     temperature: float,
     openrouter_messages: list[dict[str, str]] | None = None,
+    local_messages: list[dict[str, str]] | None = None,
 ) -> tuple[Any, str]:
     try:
         response = primary_client.chat_completion(
@@ -428,8 +472,23 @@ def _chat_completion_with_fallback(
         )
         return response, TEXT_MODEL_ID
     except Exception as hf_exc:
+        local_errors: list[str] = []
+
+        try:
+            local_text = _generate_local_report_text(
+                local_messages or openrouter_messages or messages,
+                max_new_tokens=min(max_tokens, max(256, LOCAL_REPORT_MAX_NEW_TOKENS)),
+                temperature=temperature,
+            )
+            if local_text:
+                return local_text, f"localhf:{LOCAL_REPORT_MODEL_ID}"
+        except Exception as local_exc:
+            local_errors.append(f"{LOCAL_REPORT_MODEL_ID}: {local_exc}")
+
         if not str(OPENROUTER_API_KEY or "").strip():
-            raise hf_exc
+            raise RuntimeError(
+                f"HF generation failed: {hf_exc}. Local Hugging Face fallback failed: {' | '.join(local_errors)}"
+            ) from hf_exc
 
         openrouter_client = _get_openrouter_client()
         extra_headers: dict[str, str] = {}
@@ -458,11 +517,22 @@ def _chat_completion_with_fallback(
                 openrouter_errors.append(f"{model_id}: {openrouter_exc}")
 
         raise RuntimeError(
-            f"HF generation failed: {hf_exc}. OpenRouter fallback failed: {' | '.join(openrouter_errors)}"
+            f"HF generation failed: {hf_exc}. Local Hugging Face fallback failed: {' | '.join(local_errors)}. OpenRouter fallback failed: {' | '.join(openrouter_errors)}"
         ) from last_openrouter_exc
 
 
 def _extract_message_text(response: Any) -> str:
+    if isinstance(response, str):
+        return response.strip()
+    if isinstance(response, list) and response:
+        first = response[0]
+        if isinstance(first, dict):
+            for key in ("generated_text", "text", "content"):
+                value = first.get(key)
+                if value:
+                    return str(value).strip()
+        if isinstance(first, str):
+            return first.strip()
     if not hasattr(response, "choices") or not response.choices:
         return ""
     message = response.choices[0].message
@@ -837,6 +907,10 @@ def generate_medical_report_content(
                         {"role": "system", "content": openrouter_system_prompt},
                         {"role": "user", "content": compact_openrouter_prompt},
                     ],
+                    local_messages=[
+                        {"role": "system", "content": openrouter_system_prompt},
+                        {"role": "user", "content": compact_openrouter_prompt},
+                    ],
                 )
                 model_used = provider_model_used
             else:
@@ -860,6 +934,10 @@ def generate_medical_report_content(
                         {"role": "system", "content": openrouter_system_prompt},
                         {"role": "user", "content": compact_openrouter_prompt},
                     ],
+                    local_messages=[
+                        {"role": "system", "content": openrouter_system_prompt},
+                        {"role": "user", "content": compact_openrouter_prompt},
+                    ],
                 )
                 model_used = provider_model_used
             full_report = _extract_message_text(report_response)
@@ -869,11 +947,20 @@ def generate_medical_report_content(
             precautions = _extract_section(full_report, "PRECAUTIONS", ["RECOMMENDATIONS", "END"])
 
             missing_sections = []
-            if word_count(findings) < 200:
+            if model_used.startswith("localhf:"):
+                min_findings_words = 120
+                min_impression_words = 80
+                min_precaution_words = 40
+            else:
+                min_findings_words = 200
+                min_impression_words = 140
+                min_precaution_words = 80
+
+            if word_count(findings) < min_findings_words:
                 missing_sections.append("FINDINGS")
-            if word_count(impression) < 140:
+            if word_count(impression) < min_impression_words:
                 missing_sections.append("IMPRESSION")
-            if word_count(precautions) < 80:
+            if word_count(precautions) < min_precaution_words:
                 missing_sections.append("PRECAUTIONS")
 
             if missing_sections:
@@ -895,13 +982,13 @@ def generate_medical_report_content(
                         {"role": "system", "content": openrouter_system_prompt},
                         {"role": "user", "content": refill_prompt},
                     ],
+                    local_messages=[
+                        {"role": "system", "content": openrouter_system_prompt},
+                        {"role": "user", "content": refill_prompt},
+                    ],
                 )
                 model_used = provider_model_used
-                refill_text = (
-                    refill_response.choices[0].message.content.strip()
-                    if hasattr(refill_response, "choices") and refill_response.choices
-                    else ""
-                )
+                refill_text = _extract_message_text(refill_response)
 
                 if "FINDINGS" in missing_sections:
                     findings_refill = _extract_section(refill_text, "FINDINGS", ["IMPRESSION", "PRECAUTIONS"])
