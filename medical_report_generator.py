@@ -57,9 +57,10 @@ def _get_config_value(key: str, default=None):
 
 HF_TOKEN = _get_config_value("HF_TOKEN") or _get_config_value("HUGGINGFACE_API_KEY")
 TEXT_MODEL_ID = _get_config_value("HF_TEXT_MODEL_ID", "meta-llama/Llama-3.3-70B-Instruct")
-LOCAL_REPORT_MODEL_ID = _get_config_value("LOCAL_REPORT_MODEL_ID", "google/flan-t5-small")
-LOCAL_REPORT_MAX_NEW_TOKENS = int(str(_get_config_value("LOCAL_REPORT_MAX_NEW_TOKENS", "320") or "320").strip())
-LOCAL_REPORT_PIPELINE_TASK = _get_config_value("LOCAL_REPORT_PIPELINE_TASK", "text2text-generation")
+TOGETHER_API_KEY = _get_config_value("TOGETHER_API_KEY", "")
+TOGETHER_MODEL_ID = _get_config_value("TOGETHER_MODEL_ID", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
+TOGETHER_BASE_URL = _get_config_value("TOGETHER_BASE_URL", "https://api.together.xyz/v1")
+TOGETHER_MAX_TOKENS = int(str(_get_config_value("TOGETHER_MAX_TOKENS", "1200") or "1200").strip())
 OPENROUTER_API_KEY = (
     _get_config_value("OPENROUTER_API_KEY", "")
     or _get_config_value("OPEN_ROUTER_API_KEY", "")
@@ -401,6 +402,22 @@ def get_inference_client(model_id: str | None = None) -> InferenceClient:
 
 
 @lru_cache(maxsize=1)
+def _get_together_client():
+    api_key = str(TOGETHER_API_KEY or "").strip()
+    if not api_key:
+        raise RuntimeError("TOGETHER_API_KEY is not configured.")
+    try:
+        from openai import OpenAI
+    except Exception as exc:
+        raise RuntimeError("openai package is required for Together.ai fallback.") from exc
+
+    return OpenAI(
+        api_key=api_key,
+        base_url=(TOGETHER_BASE_URL or "https://api.together.xyz/v1").rstrip("/"),
+    )
+
+
+@lru_cache(maxsize=1)
 def _get_openrouter_client():
     api_key = str(OPENROUTER_API_KEY or "").strip()
     if not api_key:
@@ -416,45 +433,7 @@ def _get_openrouter_client():
     )
 
 
-@lru_cache(maxsize=1)
-def _get_local_report_pipeline():
-    try:
-        from transformers import pipeline
-    except Exception as exc:
-        raise RuntimeError("transformers is required for local Hugging Face fallback.") from exc
 
-    try:
-        return pipeline(
-            LOCAL_REPORT_PIPELINE_TASK,
-            model=LOCAL_REPORT_MODEL_ID,
-            tokenizer=LOCAL_REPORT_MODEL_ID,
-        )
-    except Exception as exc:
-        raise RuntimeError(f"Local Hugging Face model '{LOCAL_REPORT_MODEL_ID}' could not be loaded.") from exc
-
-
-def _generate_local_report_text(messages: list[dict[str, str]], max_new_tokens: int, temperature: float) -> str:
-    generator = _get_local_report_pipeline()
-    tokenizer = getattr(generator, "tokenizer", None)
-
-    prompt = "\n\n".join(
-        f"{message.get('role', 'user').upper()}: {message.get('content', '')}"
-        for message in messages
-    )
-    if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
-        try:
-            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        except Exception:
-            pass
-
-    result = generator(
-        prompt,
-        max_new_tokens=max_new_tokens,
-        do_sample=True,
-        temperature=min(temperature, 0.7),
-        return_full_text=False,
-    )
-    return _extract_message_text(result)
 
 
 def _chat_completion_with_fallback(
@@ -463,7 +442,6 @@ def _chat_completion_with_fallback(
     max_tokens: int,
     temperature: float,
     openrouter_messages: list[dict[str, str]] | None = None,
-    local_messages: list[dict[str, str]] | None = None,
 ) -> tuple[Any, str]:
     try:
         response = primary_client.chat_completion(
@@ -473,23 +451,25 @@ def _chat_completion_with_fallback(
         )
         return response, TEXT_MODEL_ID
     except Exception as hf_exc:
-        local_errors: list[str] = []
+        together_errors: list[str] = []
 
-        try:
-            local_prompt_messages = local_messages or openrouter_messages or messages
-            local_text = _generate_local_report_text(
-                local_prompt_messages,
-                max_new_tokens=min(max_tokens, max(128, LOCAL_REPORT_MAX_NEW_TOKENS)),
-                temperature=temperature,
-            )
-            if local_text:
-                return local_text, f"localhf:{LOCAL_REPORT_MODEL_ID}"
-        except Exception as local_exc:
-            local_errors.append(f"{LOCAL_REPORT_MODEL_ID}: {local_exc}")
+        if str(TOGETHER_API_KEY or "").strip():
+            try:
+                together_client = _get_together_client()
+                request_messages = openrouter_messages or messages
+                response = together_client.chat.completions.create(
+                    model=TOGETHER_MODEL_ID,
+                    messages=request_messages,
+                    max_tokens=min(max_tokens, max(256, TOGETHER_MAX_TOKENS)),
+                    temperature=temperature,
+                )
+                return response, f"together:{TOGETHER_MODEL_ID}"
+            except Exception as together_exc:
+                together_errors.append(f"{TOGETHER_MODEL_ID}: {together_exc}")
 
         if not str(OPENROUTER_API_KEY or "").strip():
             raise RuntimeError(
-                f"HF generation failed: {hf_exc}. Local Hugging Face fallback failed: {' | '.join(local_errors)}"
+                f"HF generation failed: {hf_exc}. Together.ai fallback failed: {' | '.join(together_errors)}"
             ) from hf_exc
 
         openrouter_client = _get_openrouter_client()
@@ -519,7 +499,7 @@ def _chat_completion_with_fallback(
                 openrouter_errors.append(f"{model_id}: {openrouter_exc}")
 
         raise RuntimeError(
-            f"HF generation failed: {hf_exc}. Local Hugging Face fallback failed: {' | '.join(local_errors)}. OpenRouter fallback failed: {' | '.join(openrouter_errors)}"
+            f"HF generation failed: {hf_exc}. Together.ai fallback failed: {' | '.join(together_errors)}. OpenRouter fallback failed: {' | '.join(openrouter_errors)}"
         ) from last_openrouter_exc
 
 
@@ -838,18 +818,6 @@ def generate_medical_report_content(
                 "- CRITICAL: Each precaution point should be COMPREHENSIVE (2-3 sentences, not a one-liner). Cover the specific imaging finding, the clinical implication, and the recommended action/monitoring.\n"
                 "- CRITICAL: EVERY precaution point MUST mention a specific imaging finding from this case (e.g., 'consolidation in mid-central zone', 'bilateral involvement', 'right hemithorax', specific lobes, specific regions, severity level, distribution patterns).\n"
                 "- PRECAUTION POINT STRUCTURE: [Finding reference] + [Clinical implication/risk] + [Specific action/monitoring recommendation]\n"
-                "- Examples of CORRECT format (2-3 sentences each):\n"
-                "  1. The mid-central consolidation with high-density characteristics warrants close monitoring for signs of disease progression or potential cavitation development. Serial imaging should be considered to assess treatment response. Respiratory status and oxygen requirements must be closely tracked.\n"
-                "  2. The bilateral upper lobe involvement with significant consolidation requires aggressive antibiotic therapy initiation and close clinical monitoring. Laboratory investigations including blood cultures and sputum analysis should be performed. Close observation for signs of clinical deterioration including worsening hypoxemia is essential.\n"
-                "  3. The right hemithorax dominance with greater opacification necessitates specific surveillance for evolving oxygen requirements and potential respiratory complications. Pulse oximetry monitoring should be continuous. The patient should be assessed for signs of respiratory distress or hypoxemia requiring intervention.\n"
-                "  4. Given the multifocal pattern and overall extent of infiltration, follow-up chest imaging in 7-10 days is essential to assess treatment response. Clinical correlation with symptoms should guide imaging decisions. Advanced imaging may be needed if clinical response is suboptimal.\n"
-                "  5. The distribution pattern of consolidation suggesting community-acquired pneumonia warrants thorough clinical correlation with patient symptoms and physical examination findings. Fever curves, sputum production, and respiratory symptoms should be tracked. Negative workup for atypical organisms may be needed based on clinical presentation.\n"
-                "  6. Vigilant observation for potential complications including pleural effusion or pneumothorax development is warranted given disease severity. Chest auscultation should be performed regularly. Any new pleural findings should prompt repeat imaging and possible intervention.\n"
-                "  7. Given the multifocal and high-severity pneumonic process, consider advanced imaging such as CT if clinical deterioration occurs despite appropriate antimicrobial therapy. CT would help evaluate for complications and guide further management. Close follow-up and reassessment parameters should be established.\n"
-                "- Examples of WRONG format (DO NOT OUTPUT):\n"
-                "  BAD: '1. Monitor respiratory status.' (too generic, no imaging reference, too short)\n"
-                "  BAD: '1. The patient must exercise caution due to pneumonic consolidation....' (vague, too broad)\n"
-                "- Precautions must be DISTINCT - no point should repeat findings/recommendations from other points.\n"
                 "- All sections must demonstrate deep understanding of this patient's specific radiographic presentation.\n"
                 "- Keep clinically meaningful and evidence-based.\n"
                 "- Ignore any non-medical object labels if they appear in image-derived metadata.\n"
@@ -877,7 +845,7 @@ def generate_medical_report_content(
                 elif gradcam_image is not None:
                     gradcam_note = "Grad-CAM heatmap available: Use the model-identified focus regions to prioritize clinical analysis.\n"
                 caption_note = f"{caption}\n" if caption else ""
-                local_report_prompt = (
+                compact_openrouter_prompt = (
                     "Write a chest X-ray report for one patient using exactly these headings: FINDINGS, IMPRESSION, PRECAUTIONS. "
                     "Keep the language short, clinical, and specific to the image. "
                     "PRECAUTIONS must be exactly 7 numbered points.\n\n"
@@ -920,21 +888,9 @@ def generate_medical_report_content(
                         {"role": "system", "content": openrouter_system_prompt},
                         {"role": "user", "content": compact_openrouter_prompt},
                     ],
-                    local_messages=[
-                        {"role": "system", "content": openrouter_system_prompt},
-                        {"role": "user", "content": local_report_prompt},
-                    ],
                 )
                 model_used = provider_model_used
             else:
-                local_report_prompt = (
-                    "Write a chest X-ray report for one patient using exactly these headings: FINDINGS, IMPRESSION, PRECAUTIONS. "
-                    "Keep the language short, clinical, and specific to the image. "
-                    "PRECAUTIONS must be exactly 7 numbered points.\n\n"
-                    f"Assessment label: {prediction_label}\n"
-                    f"Severity context: {severity}\n"
-                    f"Image context: {context_text}\n"
-                )
                 compact_openrouter_prompt = (
                     "Generate a detailed chest X-ray report for one patient. "
                     "Return exactly these sections with headings: FINDINGS, IMPRESSION, PRECAUTIONS. "
@@ -955,10 +911,6 @@ def generate_medical_report_content(
                         {"role": "system", "content": openrouter_system_prompt},
                         {"role": "user", "content": compact_openrouter_prompt},
                     ],
-                    local_messages=[
-                        {"role": "system", "content": openrouter_system_prompt},
-                        {"role": "user", "content": local_report_prompt},
-                    ],
                 )
                 model_used = provider_model_used
             full_report = _extract_message_text(report_response)
@@ -968,10 +920,11 @@ def generate_medical_report_content(
             precautions = _extract_section(full_report, "PRECAUTIONS", ["RECOMMENDATIONS", "END"])
 
             missing_sections = []
-            if model_used.startswith("localhf:"):
-                min_findings_words = 40
-                min_impression_words = 25
-                min_precaution_words = 12
+
+            if model_used.startswith(("together:", "openrouter:")):
+                min_findings_words = 200
+                min_impression_words = 140
+                min_precaution_words = 80
             else:
                 min_findings_words = 200
                 min_impression_words = 140
@@ -1000,10 +953,6 @@ def generate_medical_report_content(
                     max_tokens=3500,
                     temperature=min(1.2, temperature + 0.1),
                     openrouter_messages=[
-                        {"role": "system", "content": openrouter_system_prompt},
-                        {"role": "user", "content": refill_prompt},
-                    ],
-                    local_messages=[
                         {"role": "system", "content": openrouter_system_prompt},
                         {"role": "user", "content": refill_prompt},
                     ],
