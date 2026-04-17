@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fff8ef"/>
+      <stop offset="45%" stop-color="#ffe7c2"/>
+      <stop offset="100%" stop-color="#fde68a"/>
+    </linearGradient>
+    <linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#a35d2a" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#2563eb" stop-opacity="0.16"/>
+    </linearGradient>
+    <radialGradient id="pulseA" cx="18%" cy="20%" r="25%">
+      <stop offset="0%" stop-color="#f59f00" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#f59f00" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pulseB" cx="78%" cy="72%" r="28%">
+      <stop offset="0%" stop-color="#2f9e44" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#2f9e44" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="microgrid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" fill="none" stroke="#8f5a2a" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <rect width="1920" height="1080" fill="url(#microgrid)"/>
+  <ellipse cx="320" cy="220" rx="450" ry="300" fill="url(#pulseA)"/>
+  <ellipse cx="1450" cy="760" rx="520" ry="320" fill="url(#pulseB)"/>
+
+  <g stroke="url(#lineGrad)" stroke-width="3" fill="none">
+    <path d="M120 260 C360 150, 520 210, 700 300"/>
+    <path d="M700 300 C860 380, 1010 360, 1210 230"/>
+    <path d="M470 560 C650 460, 820 520, 980 620"/>
+    <path d="M980 620 C1140 710, 1340 700, 1540 560"/>
+    <path d="M220 760 C420 660, 620 700, 780 790"/>
+    <path d="M780 790 C930 860, 1120 860, 1310 760"/>
+  </g>
+
+  <g>
+    <circle cx="120" cy="260" r="14" fill="#2563eb" fill-opacity="0.28"/>
+    <circle cx="700" cy="300" r="12" fill="#a35d2a" fill-opacity="0.28"/>
+    <circle cx="1210" cy="230" r="13" fill="#2f9e44" fill-opacity="0.24"/>
+    <circle cx="470" cy="560" r="11" fill="#2563eb" fill-opacity="0.24"/>
+    <circle cx="980" cy="620" r="13" fill="#a35d2a" fill-opacity="0.24"/>
+    <circle cx="1540" cy="560" r="12" fill="#2f9e44" fill-opacity="0.24"/>
+    <circle cx="220" cy="760" r="11" fill="#2563eb" fill-opacity="0.22"/>
+    <circle cx="780" cy="790" r="13" fill="#a35d2a" fill-opacity="0.25"/>
+    <circle cx="1310" cy="760" r="12" fill="#2f9e44" fill-opacity="0.24"/>
+  </g>
+
+  <g transform="translate(1580 130)" fill="#a35d2a" fill-opacity="0.16">
+    <rect x="-26" y="-8" width="52" height="16" rx="4"/>
+    <rect x="-8" y="-26" width="16" height="52" rx="4"/>
+  </g>
+  <g transform="translate(210 860)" fill="#2563eb" fill-opacity="0.14">
+    <rect x="-22" y="-7" width="44" height="14" rx="3"/>
+    <rect x="-7" y="-22" width="14" height="44" rx="3"/>
+  </g>
+</svg>
