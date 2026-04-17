@@ -57,8 +57,9 @@ def _get_config_value(key: str, default=None):
 
 HF_TOKEN = _get_config_value("HF_TOKEN") or _get_config_value("HUGGINGFACE_API_KEY")
 TEXT_MODEL_ID = _get_config_value("HF_TEXT_MODEL_ID", "meta-llama/Llama-3.3-70B-Instruct")
-LOCAL_REPORT_MODEL_ID = _get_config_value("LOCAL_REPORT_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")
-LOCAL_REPORT_MAX_NEW_TOKENS = int(str(_get_config_value("LOCAL_REPORT_MAX_NEW_TOKENS", "900") or "900").strip())
+LOCAL_REPORT_MODEL_ID = _get_config_value("LOCAL_REPORT_MODEL_ID", "google/flan-t5-small")
+LOCAL_REPORT_MAX_NEW_TOKENS = int(str(_get_config_value("LOCAL_REPORT_MAX_NEW_TOKENS", "320") or "320").strip())
+LOCAL_REPORT_PIPELINE_TASK = _get_config_value("LOCAL_REPORT_PIPELINE_TASK", "text2text-generation")
 OPENROUTER_API_KEY = (
     _get_config_value("OPENROUTER_API_KEY", "")
     or _get_config_value("OPEN_ROUTER_API_KEY", "")
@@ -424,7 +425,7 @@ def _get_local_report_pipeline():
 
     try:
         return pipeline(
-            "text-generation",
+            LOCAL_REPORT_PIPELINE_TASK,
             model=LOCAL_REPORT_MODEL_ID,
             tokenizer=LOCAL_REPORT_MODEL_ID,
         )
@@ -450,7 +451,7 @@ def _generate_local_report_text(messages: list[dict[str, str]], max_new_tokens: 
         prompt,
         max_new_tokens=max_new_tokens,
         do_sample=True,
-        temperature=temperature,
+        temperature=min(temperature, 0.7),
         return_full_text=False,
     )
     return _extract_message_text(result)
@@ -475,9 +476,10 @@ def _chat_completion_with_fallback(
         local_errors: list[str] = []
 
         try:
+            local_prompt_messages = local_messages or openrouter_messages or messages
             local_text = _generate_local_report_text(
-                local_messages or openrouter_messages or messages,
-                max_new_tokens=min(max_tokens, max(256, LOCAL_REPORT_MAX_NEW_TOKENS)),
+                local_prompt_messages,
+                max_new_tokens=min(max_tokens, max(128, LOCAL_REPORT_MAX_NEW_TOKENS)),
                 temperature=temperature,
             )
             if local_text:
@@ -875,6 +877,17 @@ def generate_medical_report_content(
                 elif gradcam_image is not None:
                     gradcam_note = "Grad-CAM heatmap available: Use the model-identified focus regions to prioritize clinical analysis.\n"
                 caption_note = f"{caption}\n" if caption else ""
+                local_report_prompt = (
+                    "Write a chest X-ray report for one patient using exactly these headings: FINDINGS, IMPRESSION, PRECAUTIONS. "
+                    "Keep the language short, clinical, and specific to the image. "
+                    "PRECAUTIONS must be exactly 7 numbered points.\n\n"
+                    f"Assessment label: {prediction_label}\n"
+                    f"Severity context: {severity}\n"
+                    f"Image context: {context_text}\n\n"
+                    "Image notes:\n"
+                    f"{caption_note}"
+                    f"{gradcam_note}"
+                )
                 compact_openrouter_prompt = (
                     "Generate a detailed chest X-ray report for one patient. "
                     "Return exactly these sections with headings: FINDINGS, IMPRESSION, PRECAUTIONS. "
@@ -909,11 +922,19 @@ def generate_medical_report_content(
                     ],
                     local_messages=[
                         {"role": "system", "content": openrouter_system_prompt},
-                        {"role": "user", "content": compact_openrouter_prompt},
+                        {"role": "user", "content": local_report_prompt},
                     ],
                 )
                 model_used = provider_model_used
             else:
+                local_report_prompt = (
+                    "Write a chest X-ray report for one patient using exactly these headings: FINDINGS, IMPRESSION, PRECAUTIONS. "
+                    "Keep the language short, clinical, and specific to the image. "
+                    "PRECAUTIONS must be exactly 7 numbered points.\n\n"
+                    f"Assessment label: {prediction_label}\n"
+                    f"Severity context: {severity}\n"
+                    f"Image context: {context_text}\n"
+                )
                 compact_openrouter_prompt = (
                     "Generate a detailed chest X-ray report for one patient. "
                     "Return exactly these sections with headings: FINDINGS, IMPRESSION, PRECAUTIONS. "
@@ -936,7 +957,7 @@ def generate_medical_report_content(
                     ],
                     local_messages=[
                         {"role": "system", "content": openrouter_system_prompt},
-                        {"role": "user", "content": compact_openrouter_prompt},
+                        {"role": "user", "content": local_report_prompt},
                     ],
                 )
                 model_used = provider_model_used
@@ -948,9 +969,9 @@ def generate_medical_report_content(
 
             missing_sections = []
             if model_used.startswith("localhf:"):
-                min_findings_words = 120
-                min_impression_words = 80
-                min_precaution_words = 40
+                min_findings_words = 40
+                min_impression_words = 25
+                min_precaution_words = 12
             else:
                 min_findings_words = 200
                 min_impression_words = 140
