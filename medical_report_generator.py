@@ -63,6 +63,16 @@ OPENROUTER_API_KEY = (
 )
 OPENROUTER_BASE_URL = _get_config_value("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_MODEL_ID = _get_config_value("OPENROUTER_MODEL_ID", "meta-llama/llama-3.3-70b-instruct:free")
+OPENROUTER_MODEL_IDS = [
+    model_id.strip()
+    for model_id in str(
+        _get_config_value(
+            "OPENROUTER_MODEL_IDS",
+            "meta-llama/llama-3.3-70b-instruct:free,meta-llama/llama-3.1-70b-instruct:free,meta-llama/llama-3.1-8b-instruct:free",
+        )
+    ).split(",")
+    if model_id.strip()
+]
 OPENROUTER_HTTP_REFERER = _get_config_value("OPENROUTER_HTTP_REFERER", "")
 OPENROUTER_X_TITLE = _get_config_value("OPENROUTER_X_TITLE", "AarogyaVeda")
 OPENROUTER_MAX_TOKENS = int(str(_get_config_value("OPENROUTER_MAX_TOKENS", "1800") or "1800").strip())
@@ -408,6 +418,7 @@ def _chat_completion_with_fallback(
     messages: list[dict[str, str]],
     max_tokens: int,
     temperature: float,
+    openrouter_messages: list[dict[str, str]] | None = None,
 ) -> tuple[Any, str]:
     try:
         response = primary_client.chat_completion(
@@ -427,19 +438,28 @@ def _chat_completion_with_fallback(
         if OPENROUTER_X_TITLE:
             extra_headers["X-Title"] = OPENROUTER_X_TITLE
 
-        try:
-            response = openrouter_client.chat.completions.create(
-                model=OPENROUTER_MODEL_ID,
-                messages=messages,
-                max_tokens=min(max_tokens, max(256, OPENROUTER_MAX_TOKENS)),
-                temperature=temperature,
-                extra_headers=extra_headers or None,
-            )
-            return response, f"openrouter:{OPENROUTER_MODEL_ID}"
-        except Exception as openrouter_exc:
-            raise RuntimeError(
-                f"HF generation failed: {hf_exc}. OpenRouter fallback failed: {openrouter_exc}"
-            ) from openrouter_exc
+        request_messages = openrouter_messages or messages
+        openrouter_errors: list[str] = []
+        model_ids = OPENROUTER_MODEL_IDS or [OPENROUTER_MODEL_ID]
+        last_openrouter_exc: Exception | None = None
+
+        for model_id in model_ids:
+            try:
+                response = openrouter_client.chat.completions.create(
+                    model=model_id,
+                    messages=request_messages,
+                    max_tokens=min(max_tokens, max(256, OPENROUTER_MAX_TOKENS)),
+                    temperature=temperature,
+                    extra_headers=extra_headers or None,
+                )
+                return response, f"openrouter:{model_id}"
+            except Exception as openrouter_exc:
+                last_openrouter_exc = openrouter_exc
+                openrouter_errors.append(f"{model_id}: {openrouter_exc}")
+
+        raise RuntimeError(
+            f"HF generation failed: {hf_exc}. OpenRouter fallback failed: {' | '.join(openrouter_errors)}"
+        ) from last_openrouter_exc
 
 
 def _extract_message_text(response: Any) -> str:
@@ -672,6 +692,10 @@ def generate_medical_report_content(
     severity = "High" if is_severe else "Low"
     min_precaution_points = 7 if is_severe else 5
     context_text = case_context if case_context else "Comprehensive chest X-ray review without additional contextual annotations."
+    openrouter_system_prompt = (
+        "You are an expert radiologist. Write a clinical chest X-ray report with these sections only: "
+        "FINDINGS, IMPRESSION, PRECAUTIONS. Use only the word patient. Do not mention confidence, scores, or model terms."
+    )
 
     system_prompt = (
         "You are an expert radiologist writing detailed chest X-ray reports. "
@@ -781,6 +805,19 @@ def generate_medical_report_content(
                 elif gradcam_image is not None:
                     gradcam_note = "Grad-CAM heatmap available: Use the model-identified focus regions to prioritize clinical analysis.\n"
                 caption_note = f"{caption}\n" if caption else ""
+                compact_openrouter_prompt = (
+                    "Generate a detailed chest X-ray report for one patient. "
+                    "Return exactly these sections with headings: FINDINGS, IMPRESSION, PRECAUTIONS. "
+                    "Keep findings and impression case-specific and clinically plausible. "
+                    "PRECAUTIONS must be exactly 7 numbered points, each tied to an imaging finding.\n\n"
+                    f"Assessment label: {prediction_label}\n"
+                    f"Severity context: {severity}\n"
+                    f"Image context: {context_text}\n\n"
+                    "IMAGE-DERIVED CONTEXT:\n"
+                    f"{caption_note}"
+                    f"{gradcam_note}"
+                    "Ignore any non-medical labels. Focus strictly on chest radiographic findings."
+                )
                 image_assisted_prompt = (
                     f"{combined_prompt}\n\n"
                     "IMAGE-DERIVED CONTEXT:\n"
@@ -796,9 +833,21 @@ def generate_medical_report_content(
                     ],
                     max_tokens=6000,
                     temperature=temperature,
+                    openrouter_messages=[
+                        {"role": "system", "content": openrouter_system_prompt},
+                        {"role": "user", "content": compact_openrouter_prompt},
+                    ],
                 )
                 model_used = provider_model_used
             else:
+                compact_openrouter_prompt = (
+                    "Generate a detailed chest X-ray report for one patient. "
+                    "Return exactly these sections with headings: FINDINGS, IMPRESSION, PRECAUTIONS. "
+                    "PRECAUTIONS must be exactly 7 numbered points.\n\n"
+                    f"Assessment label: {prediction_label}\n"
+                    f"Severity context: {severity}\n"
+                    f"Image context: {context_text}\n"
+                )
                 report_response, provider_model_used = _chat_completion_with_fallback(
                     primary_client=client,
                     messages=[
@@ -807,6 +856,10 @@ def generate_medical_report_content(
                     ],
                     max_tokens=6000,
                     temperature=temperature,
+                    openrouter_messages=[
+                        {"role": "system", "content": openrouter_system_prompt},
+                        {"role": "user", "content": compact_openrouter_prompt},
+                    ],
                 )
                 model_used = provider_model_used
             full_report = _extract_message_text(report_response)
@@ -838,6 +891,10 @@ def generate_medical_report_content(
                     ],
                     max_tokens=3500,
                     temperature=min(1.2, temperature + 0.1),
+                    openrouter_messages=[
+                        {"role": "system", "content": openrouter_system_prompt},
+                        {"role": "user", "content": refill_prompt},
+                    ],
                 )
                 model_used = provider_model_used
                 refill_text = (
