@@ -1117,6 +1117,20 @@ elif selected_tab == "TAB 4 PREDICTION HISTORY":
         history_csv = latest_history.copy()
         if "history_key" in history_csv.columns:
             history_csv = history_csv.drop(columns=["history_key"])
+
+        if "confidence" in history_csv.columns:
+            history_csv = history_csv.drop(columns=["confidence"])
+
+        if "risk_probability" in history_csv.columns:
+            def _to_percent(value):
+                try:
+                    val = float(value)
+                    pct = val * 100.0 if val <= 1.0 else val
+                    return f"{pct:.2f}%"
+                except (TypeError, ValueError):
+                    return value
+
+            history_csv["risk_probability"] = history_csv["risk_probability"].apply(_to_percent)
         
                                                    
         if "drive_url" in history_csv.columns:
