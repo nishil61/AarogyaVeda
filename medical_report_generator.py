@@ -57,10 +57,10 @@ def _get_config_value(key: str, default=None):
 
 HF_TOKEN = _get_config_value("HF_TOKEN") or _get_config_value("HUGGINGFACE_API_KEY")
 TEXT_MODEL_ID = _get_config_value("HF_TEXT_MODEL_ID", "meta-llama/Llama-3.3-70B-Instruct")
-TOGETHER_API_KEY = _get_config_value("TOGETHER_API_KEY", "")
-TOGETHER_MODEL_ID = _get_config_value("TOGETHER_MODEL_ID", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
-TOGETHER_BASE_URL = _get_config_value("TOGETHER_BASE_URL", "https://api.together.xyz/v1")
-TOGETHER_MAX_TOKENS = int(str(_get_config_value("TOGETHER_MAX_TOKENS", "1200") or "1200").strip())
+GROQ_API_KEY = _get_config_value("GROQ_API_KEY", "")
+GROQ_MODEL_ID = _get_config_value("GROQ_MODEL_ID", "llama-3.1-70b-versatile")
+GROQ_BASE_URL = _get_config_value("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+GROQ_MAX_TOKENS = int(str(_get_config_value("GROQ_MAX_TOKENS", "1200") or "1200").strip())
 OPENROUTER_API_KEY = (
     _get_config_value("OPENROUTER_API_KEY", "")
     or _get_config_value("OPEN_ROUTER_API_KEY", "")
@@ -402,18 +402,18 @@ def get_inference_client(model_id: str | None = None) -> InferenceClient:
 
 
 @lru_cache(maxsize=1)
-def _get_together_client():
-    api_key = str(TOGETHER_API_KEY or "").strip()
+def _get_groq_client():
+    api_key = str(GROQ_API_KEY or "").strip()
     if not api_key:
-        raise RuntimeError("TOGETHER_API_KEY is not configured.")
+        raise RuntimeError("GROQ_API_KEY is not configured.")
     try:
         from openai import OpenAI
     except Exception as exc:
-        raise RuntimeError("openai package is required for Together.ai fallback.") from exc
+        raise RuntimeError("openai package is required for Groq fallback.") from exc
 
     return OpenAI(
         api_key=api_key,
-        base_url=(TOGETHER_BASE_URL or "https://api.together.xyz/v1").rstrip("/"),
+        base_url=(GROQ_BASE_URL or "https://api.groq.com/openai/v1").rstrip("/"),
     )
 
 
@@ -451,25 +451,25 @@ def _chat_completion_with_fallback(
         )
         return response, TEXT_MODEL_ID
     except Exception as hf_exc:
-        together_errors: list[str] = []
+        groq_errors: list[str] = []
 
-        if str(TOGETHER_API_KEY or "").strip():
+        if str(GROQ_API_KEY or "").strip():
             try:
-                together_client = _get_together_client()
+                groq_client = _get_groq_client()
                 request_messages = openrouter_messages or messages
-                response = together_client.chat.completions.create(
-                    model=TOGETHER_MODEL_ID,
+                response = groq_client.chat.completions.create(
+                    model=GROQ_MODEL_ID,
                     messages=request_messages,
-                    max_tokens=min(max_tokens, max(256, TOGETHER_MAX_TOKENS)),
+                    max_tokens=min(max_tokens, max(256, GROQ_MAX_TOKENS)),
                     temperature=temperature,
                 )
-                return response, f"together:{TOGETHER_MODEL_ID}"
-            except Exception as together_exc:
-                together_errors.append(f"{TOGETHER_MODEL_ID}: {together_exc}")
+                return response, f"groq:{GROQ_MODEL_ID}"
+            except Exception as groq_exc:
+                groq_errors.append(f"{GROQ_MODEL_ID}: {groq_exc}")
 
         if not str(OPENROUTER_API_KEY or "").strip():
             raise RuntimeError(
-                f"HF generation failed: {hf_exc}. Together.ai fallback failed: {' | '.join(together_errors)}"
+                f"HF generation failed: {hf_exc}. Groq fallback failed: {' | '.join(groq_errors)}"
             ) from hf_exc
 
         openrouter_client = _get_openrouter_client()
@@ -499,7 +499,7 @@ def _chat_completion_with_fallback(
                 openrouter_errors.append(f"{model_id}: {openrouter_exc}")
 
         raise RuntimeError(
-            f"HF generation failed: {hf_exc}. Together.ai fallback failed: {' | '.join(together_errors)}. OpenRouter fallback failed: {' | '.join(openrouter_errors)}"
+            f"HF generation failed: {hf_exc}. Groq fallback failed: {' | '.join(groq_errors)}. OpenRouter fallback failed: {' | '.join(openrouter_errors)}"
         ) from last_openrouter_exc
 
 
@@ -921,7 +921,7 @@ def generate_medical_report_content(
 
             missing_sections = []
 
-            if model_used.startswith(("together:", "openrouter:")):
+            if model_used.startswith(("groq:", "openrouter:")):
                 min_findings_words = 200
                 min_impression_words = 140
                 min_precaution_words = 80
