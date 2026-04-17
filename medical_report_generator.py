@@ -57,11 +57,15 @@ def _get_config_value(key: str, default=None):
 
 HF_TOKEN = _get_config_value("HF_TOKEN") or _get_config_value("HUGGINGFACE_API_KEY")
 TEXT_MODEL_ID = _get_config_value("HF_TEXT_MODEL_ID", "meta-llama/Llama-3.3-70B-Instruct")
-OPENROUTER_API_KEY = _get_config_value("OPENROUTER_API_KEY", "")
+OPENROUTER_API_KEY = (
+    _get_config_value("OPENROUTER_API_KEY", "")
+    or _get_config_value("OPEN_ROUTER_API_KEY", "")
+)
 OPENROUTER_BASE_URL = _get_config_value("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_MODEL_ID = _get_config_value("OPENROUTER_MODEL_ID", "meta-llama/llama-3.3-70b-instruct:free")
 OPENROUTER_HTTP_REFERER = _get_config_value("OPENROUTER_HTTP_REFERER", "")
 OPENROUTER_X_TITLE = _get_config_value("OPENROUTER_X_TITLE", "AarogyaVeda")
+OPENROUTER_MAX_TOKENS = int(str(_get_config_value("OPENROUTER_MAX_TOKENS", "1800") or "1800").strip())
 IMAGE_CAPTION_MODEL_ID = _get_config_value("HF_IMAGE_CAPTION_MODEL_ID", "Salesforce/blip-image-captioning-base")
 IMAGE_CLASSIFICATION_MODEL_ID = _get_config_value("HF_IMAGE_CLASSIFICATION_MODEL_ID", "google/vit-base-patch16-224")
 SIGN_CANDIDATES = ["AarogyaVeda Sign.png"]
@@ -385,7 +389,8 @@ def get_inference_client(model_id: str | None = None) -> InferenceClient:
 
 @lru_cache(maxsize=1)
 def _get_openrouter_client():
-    if not OPENROUTER_API_KEY:
+    api_key = str(OPENROUTER_API_KEY or "").strip()
+    if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is not configured.")
     try:
         from openai import OpenAI
@@ -393,7 +398,7 @@ def _get_openrouter_client():
         raise RuntimeError("openai package is required for OpenRouter fallback.") from exc
 
     return OpenAI(
-        api_key=OPENROUTER_API_KEY,
+        api_key=api_key,
         base_url=(OPENROUTER_BASE_URL or "https://openrouter.ai/api/v1").rstrip("/"),
     )
 
@@ -412,7 +417,7 @@ def _chat_completion_with_fallback(
         )
         return response, TEXT_MODEL_ID
     except Exception as hf_exc:
-        if not OPENROUTER_API_KEY:
+        if not str(OPENROUTER_API_KEY or "").strip():
             raise hf_exc
 
         openrouter_client = _get_openrouter_client()
@@ -426,7 +431,7 @@ def _chat_completion_with_fallback(
             response = openrouter_client.chat.completions.create(
                 model=OPENROUTER_MODEL_ID,
                 messages=messages,
-                max_tokens=max_tokens,
+                max_tokens=min(max_tokens, max(256, OPENROUTER_MAX_TOKENS)),
                 temperature=temperature,
                 extra_headers=extra_headers or None,
             )
@@ -870,7 +875,11 @@ def generate_medical_report_content(
 
     findings, impression, precautions = best_sections
     if not findings or not impression or not precautions:
-        error_msg = (last_error[:200] if last_error else "generation unavailable")
+        if last_error:
+            compact = re.sub(r"\s+", " ", str(last_error)).strip()
+            error_msg = compact[:520]
+        else:
+            error_msg = "generation unavailable"
         return {
             "findings": f"Report generation unavailable: {error_msg}",
             "impression": "Unable to generate impression at this time.",
