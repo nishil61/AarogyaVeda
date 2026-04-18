@@ -58,9 +58,9 @@ def _get_config_value(key: str, default=None):
 HF_TOKEN = _get_config_value("HF_TOKEN") or _get_config_value("HUGGINGFACE_API_KEY")
 TEXT_MODEL_ID = _get_config_value("HF_TEXT_MODEL_ID", "meta-llama/Llama-3.3-70B-Instruct")
 GROQ_API_KEY = _get_config_value("GROQ_API_KEY", "")
-GROQ_MODEL_ID = _get_config_value("GROQ_MODEL_ID", "llama-3.1-70b-versatile")
+GROQ_MODEL_ID = _get_config_value("GROQ_MODEL_ID", "mixtral-8x7b-32768")
 GROQ_BASE_URL = _get_config_value("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-GROQ_MAX_TOKENS = int(str(_get_config_value("GROQ_MAX_TOKENS", "1200") or "1200").strip())
+GROQ_MAX_TOKENS = int(str(_get_config_value("GROQ_MAX_TOKENS", "1500") or "1500").strip())
 OPENROUTER_API_KEY = (
     _get_config_value("OPENROUTER_API_KEY", "")
     or _get_config_value("OPEN_ROUTER_API_KEY", "")
@@ -210,9 +210,8 @@ def _extract_section(text: str, section_name: str, next_sections: list[str]) -> 
     if not text:
         return ""
     
-                                               
     section_start = None
-    section_pattern = rf"(?:^|\n)\s*{re.escape(section_name)}\s*:?\s*(?:\n|$)"
+    section_pattern = rf"(?:^|\n)\s*(?:#|\*|_)*\s*{re.escape(section_name)}\b\s*(?:#|\*|_)*\s*:?\s*"
     
     for match in re.finditer(section_pattern, text, flags=re.IGNORECASE | re.MULTILINE):
         section_start = match.end()
@@ -221,10 +220,9 @@ def _extract_section(text: str, section_name: str, next_sections: list[str]) -> 
     if section_start is None:
         return ""
     
-                                    
     section_end = len(text)
     for next_sec in next_sections:
-        next_pattern = rf"(?:^|\n)\s*{re.escape(next_sec)}\s*:?\s*(?:\n|$)"
+        next_pattern = rf"(?:^|\n)\s*(?:#|\*|_)*\s*{re.escape(next_sec)}\b\s*(?:#|\*|_)*\s*:?\s*"
         for match in re.finditer(next_pattern, text[section_start:], flags=re.IGNORECASE | re.MULTILINE):
             end_pos = section_start + match.start()
             if end_pos < section_end:
@@ -232,9 +230,7 @@ def _extract_section(text: str, section_name: str, next_sections: list[str]) -> 
             break
     
     content = text[section_start:section_end].strip()
-                                                      
-    content = re.sub(rf"^\s*(?:{section_name}|IMPRESSION|PRECAUTIONS|FINDINGS)\s*:?\s*", "", content, flags=re.IGNORECASE)
-    return content.strip()
+    return content
 
 
 def _remove_numeric_factors(text: str) -> str:
@@ -465,16 +461,16 @@ def _chat_completion_with_fallback(
                     model=GROQ_MODEL_ID,
                     messages=request_messages,
                     max_tokens=min(max_tokens, max(256, GROQ_MAX_TOKENS)),
-                    temperature=min(temperature, 1.0),
+                    temperature=min(temperature, 0.7),
                 )
                 return response, f"groq:{GROQ_MODEL_ID}"
             except Exception as groq_exc:
-                groq_errors.append(f"Groq error with model {GROQ_MODEL_ID}: {str(groq_exc)[:200]}")
+                error_msg = str(groq_exc)
+                groq_errors.append(f"Groq ({GROQ_MODEL_ID}): {error_msg}")
 
         if not str(OPENROUTER_API_KEY or "").strip():
-            raise RuntimeError(
-                f"HF generation failed: {hf_exc}. Groq fallback failed: {' | '.join(groq_errors)}"
-            ) from hf_exc
+            full_error = f"HF generation failed: {str(hf_exc)[:300]}. Groq fallback failed: {' | '.join(groq_errors)}"
+            raise RuntimeError(full_error) from hf_exc
 
         openrouter_client = _get_openrouter_client()
         extra_headers: dict[str, str] = {}
@@ -926,13 +922,13 @@ def generate_medical_report_content(
             missing_sections = []
 
             if model_used.startswith(("groq:", "openrouter:")):
-                min_findings_words = 200
-                min_impression_words = 140
-                min_precaution_words = 80
+                min_findings_words = 80
+                min_impression_words = 50
+                min_precaution_words = 30
             else:
-                min_findings_words = 200
-                min_impression_words = 140
-                min_precaution_words = 80
+                min_findings_words = 150
+                min_impression_words = 100
+                min_precaution_words = 50
 
             if word_count(findings) < min_findings_words:
                 missing_sections.append("FINDINGS")
@@ -982,9 +978,9 @@ def generate_medical_report_content(
                 best_score = score
 
             if (
-                word_count(findings) >= 300
-                and word_count(impression) >= 200
-                and word_count(precautions) >= 120
+                word_count(findings) >= min_findings_words
+                and word_count(impression) >= min_impression_words
+                and word_count(precautions) >= min_precaution_words
             ):
                 break
 
@@ -994,8 +990,7 @@ def generate_medical_report_content(
     findings, impression, precautions = best_sections
     if not findings or not impression or not precautions:
         if last_error:
-            compact = re.sub(r"\s+", " ", str(last_error)).strip()
-            error_msg = compact[:520]
+            error_msg = str(last_error)
         else:
             error_msg = "generation unavailable"
         return {
