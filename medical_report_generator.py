@@ -58,7 +58,8 @@ def _get_config_value(key: str, default=None):
 HF_TOKEN = _get_config_value("HF_TOKEN") or _get_config_value("HUGGINGFACE_API_KEY")
 TEXT_MODEL_ID = _get_config_value("HF_TEXT_MODEL_ID", "meta-llama/Llama-3.3-70B-Instruct")
 GROQ_API_KEY = _get_config_value("GROQ_API_KEY", "")
-GROQ_MODEL_ID = _get_config_value("GROQ_MODEL_ID", "llama-3.3-70b-versatile")
+# Force overriding whatever is in Streamlit secrets to a known working model
+GROQ_MODEL_ID = "llama-3.3-70b-versatile"
 GROQ_BASE_URL = _get_config_value("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_MAX_TOKENS = int(str(_get_config_value("GROQ_MAX_TOKENS", "1500") or "1500").strip())
 OPENROUTER_API_KEY = (
