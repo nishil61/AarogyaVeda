@@ -61,7 +61,7 @@ GROQ_API_KEY = _get_config_value("GROQ_API_KEY", "")
 # Force overriding whatever is in Streamlit secrets to a known working model
 GROQ_MODEL_ID = "llama-3.3-70b-versatile"
 GROQ_BASE_URL = _get_config_value("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-GROQ_MAX_TOKENS = int(str(_get_config_value("GROQ_MAX_TOKENS", "1500") or "1500").strip())
+GROQ_MAX_TOKENS = int(str(_get_config_value("GROQ_MAX_TOKENS", "4096") or "4096").strip())
 OPENROUTER_API_KEY = (
     _get_config_value("OPENROUTER_API_KEY", "")
     or _get_config_value("OPEN_ROUTER_API_KEY", "")
@@ -457,7 +457,8 @@ def _chat_completion_with_fallback(
         if str(GROQ_API_KEY or "").strip():
             try:
                 groq_client = _get_groq_client()
-                request_messages = openrouter_messages or messages
+                # Groq using Llama-3.3-70b is powerful enough to handle the same detailed prompt as HuggingFace
+                request_messages = messages
                 response = groq_client.chat.completions.create(
                     model=GROQ_MODEL_ID,
                     messages=request_messages,
@@ -480,7 +481,8 @@ def _chat_completion_with_fallback(
         if OPENROUTER_X_TITLE:
             extra_headers["X-Title"] = OPENROUTER_X_TITLE
 
-        request_messages = openrouter_messages or messages
+        # Using same full-length prompt as primary model for openrouter as well
+        request_messages = messages
         openrouter_errors: list[str] = []
         model_ids = OPENROUTER_MODEL_IDS or [OPENROUTER_MODEL_ID]
         last_openrouter_exc: Exception | None = None
