@@ -404,17 +404,21 @@ def get_inference_client(model_id: str | None = None) -> InferenceClient:
 @lru_cache(maxsize=1)
 def _get_groq_client():
     api_key = str(GROQ_API_KEY or "").strip()
-    if not api_key:
-        raise RuntimeError("GROQ_API_KEY is not configured.")
+    if not api_key or api_key == "":
+        raise RuntimeError("GROQ_API_KEY is not configured in Streamlit secrets. Please add GROQ_API_KEY to secrets at https://console.groq.com/")
     try:
         from openai import OpenAI
     except Exception as exc:
         raise RuntimeError("openai package is required for Groq fallback.") from exc
 
-    return OpenAI(
-        api_key=api_key,
-        base_url=(GROQ_BASE_URL or "https://api.groq.com/openai/v1").rstrip("/"),
-    )
+    try:
+        client = OpenAI(
+            api_key=api_key,
+            base_url=(GROQ_BASE_URL or "https://api.groq.com/openai/v1").rstrip("/"),
+        )
+        return client
+    except Exception as exc:
+        raise RuntimeError(f"Failed to initialize Groq client: {exc}") from exc
 
 
 @lru_cache(maxsize=1)
@@ -461,11 +465,11 @@ def _chat_completion_with_fallback(
                     model=GROQ_MODEL_ID,
                     messages=request_messages,
                     max_tokens=min(max_tokens, max(256, GROQ_MAX_TOKENS)),
-                    temperature=temperature,
+                    temperature=min(temperature, 1.0),
                 )
                 return response, f"groq:{GROQ_MODEL_ID}"
             except Exception as groq_exc:
-                groq_errors.append(f"{GROQ_MODEL_ID}: {groq_exc}")
+                groq_errors.append(f"Groq error with model {GROQ_MODEL_ID}: {str(groq_exc)[:200]}")
 
         if not str(OPENROUTER_API_KEY or "").strip():
             raise RuntimeError(
