@@ -14,7 +14,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-from huggingface_hub import InferenceClient, get_token
+# Defer importing huggingface_hub until runtime to avoid loading heavy native
+# dependencies at module import time which can cause segmentation faults
+InferenceClient = None
+get_token = None
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -392,6 +395,15 @@ def _rewrite_report_sections(
 
 
 def get_inference_client(model_id: str | None = None) -> InferenceClient:
+    global InferenceClient, get_token
+    try:
+        if InferenceClient is None or get_token is None:
+            from huggingface_hub import InferenceClient as _InferenceClient, get_token as _get_token
+            InferenceClient = _InferenceClient
+            get_token = _get_token
+    except Exception as exc:
+        raise RuntimeError("huggingface_hub is required for hosted HF inference but is not available in this environment.") from exc
+
     token = HF_TOKEN or get_token()
     if not token:
         raise RuntimeError("Set HF_TOKEN in .env or run hf auth login first.")
