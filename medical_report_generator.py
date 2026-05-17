@@ -42,6 +42,11 @@ except Exception:
 
 load_dotenv()
 
+# Disable local transformers/pytorch usage in deployed environments by default.
+# Enabling local vision models may pull in heavy native libraries (torch, tokenizers)
+# which can cause segmentation faults in environments without GPU drivers.
+USE_LOCAL_TRANSFORMERS = str(os.getenv("ENABLE_LOCAL_TRANSFORMERS", "false")).strip().lower() in {"1", "true", "yes", "on"}
+
 
 def _get_config_value(key: str, default=None):
     value = os.getenv(key)
@@ -573,6 +578,8 @@ def _extract_caption_text(caption_response: Any) -> str:
 
 @lru_cache(maxsize=2)
 def _get_local_caption_pipeline():
+    if not USE_LOCAL_TRANSFORMERS:
+        raise RuntimeError("Local transformers pipelines disabled in this environment.")
     try:
         from transformers import pipeline
     except Exception as exc:
@@ -582,6 +589,8 @@ def _get_local_caption_pipeline():
 
 @lru_cache(maxsize=2)
 def _get_local_classification_pipeline():
+    if not USE_LOCAL_TRANSFORMERS:
+        raise RuntimeError("Local transformers pipelines disabled in this environment.")
     try:
         from transformers import pipeline
     except Exception as exc:
