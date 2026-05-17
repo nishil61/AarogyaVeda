@@ -16,12 +16,34 @@ from typing import Dict, Tuple
 import numpy as np
 
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
-
-import tensorflow as tf
 from PIL import Image
-from transformers import pipeline
 
-tf.get_logger().setLevel("ERROR")
+# Lazily-import heavy ML libraries to avoid importing them at module import time
+# which can cause segmentation faults in restricted/deployed environments.
+_tf = None
+
+def _get_tf():
+    global _tf
+    if _tf is None:
+        import tensorflow as tf
+
+        try:
+            tf.get_logger().setLevel("ERROR")
+        except Exception:
+            pass
+        _tf = tf
+    return _tf
+
+
+@lru_cache(maxsize=1)
+def _get_xray_validator():
+    from transformers import pipeline
+
+    return pipeline(
+        "zero-shot-image-classification",
+        model=XRAY_VALIDATION_MODEL_ID,
+        device=-1,
+    )
 warnings.filterwarnings(
     "ignore",
     message=r"The structure of `inputs` doesn't match the expected structure\.",
@@ -54,6 +76,7 @@ def _get_xray_validator():
 
 
 def get_preprocess_fn(backbone: str):
+    tf = _get_tf()
     if backbone == "EfficientNetV2S":
         return tf.keras.applications.efficientnet_v2.preprocess_input
     if backbone == "ResNet50":
@@ -61,7 +84,8 @@ def get_preprocess_fn(backbone: str):
     return tf.keras.applications.mobilenet_v2.preprocess_input
 
 
-def build_transfer_model(backbone: str = "ResNet50", image_size: Tuple[int, int] = (224, 224)) -> tf.keras.Model:
+def build_transfer_model(backbone: str = "ResNet50", image_size: Tuple[int, int] = (224, 224)) -> "tf.keras.Model":
+    tf = _get_tf()
     input_shape = (image_size[0], image_size[1], 3)
 
     if backbone == "EfficientNetV2S":
@@ -106,6 +130,7 @@ def load_image_datasets(
     image_size: Tuple[int, int] = (224, 224),
     batch_size: int = 16,
 ):
+    tf = _get_tf()
     train_dir = dataset_root / "train"
     val_dir = dataset_root / "val"
     test_dir = dataset_root / "test"
@@ -154,6 +179,8 @@ def train_or_load_cv_model(
     epochs: int = 2,
     evaluate_loaded_model: bool = False,
 ) -> Tuple[tf.keras.Model, Dict[str, float]]:
+    tf = _get_tf()
+
     if model_path.exists():
         try:
             # Some environments fail to load optimizer/training metadata from older .keras files.
@@ -219,11 +246,12 @@ def train_or_load_cv_model(
     return model, {"loss": float(eval_vals[0]), "accuracy": float(eval_vals[1]), "auc": float(eval_vals[2])}
 
 
-def load_pretrained_cv_model(model_path: Path) -> tf.keras.Model:
+def load_pretrained_cv_model(model_path: Path) -> "tf.keras.Model":
     """
     Load a saved Keras model for inference only.
     This avoids any dataset access, evaluation, or training behavior.
     """
+    tf = _get_tf()
     return tf.keras.models.load_model(model_path, compile=False)
 
 
@@ -282,6 +310,7 @@ def preprocess_uploaded_xray(uploaded_image: Image.Image, image_size: Tuple[int,
 
 
 def predict_xray(model: tf.keras.Model, processed_image: np.ndarray, threshold: float = 0.70) -> Dict[str, float]:
+    tf = _get_tf()
     model_inputs = [processed_image] if len(getattr(model, "inputs", []) or []) == 1 else processed_image
     pneumonia_prob = float(model.predict(model_inputs, verbose=0)[0][0])
     normal_prob = 1.0 - pneumonia_prob
@@ -330,6 +359,7 @@ def generate_gradcam_heatmap(
     image_array: np.ndarray,
     pred_index: int | None = None,
 ) -> np.ndarray:
+    tf = _get_tf()
     model_inputs = [image_array] if len(getattr(model, "inputs", []) or []) == 1 else image_array
 
     for conv_layer_name in get_conv_layer_candidates(model):
